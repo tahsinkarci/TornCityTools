@@ -1,0 +1,1 @@
+{"fee_percent": 5.0, "min_profit": 10000, "min_roi_percent": 2.0, "request_delay": 0.7, "skip_types": ["Weapon", "Armor"], "min_market_price": 1000, "watchlist": ["Xanax", "RF Detector"], "money_source": "wallet", "money_override": null, "scan_items": 200}
