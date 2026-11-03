@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+*.tmp
+
+# Personal settings and local data (see config.example.json for the defaults)
+config.json
+items_cache.json
+market_history.json

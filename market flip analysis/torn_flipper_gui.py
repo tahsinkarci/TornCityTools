@@ -631,8 +631,19 @@ class App:
         ttk.Checkbutton(frm, text="Skip weapons and armor (each one is unique, gaps mislead)",
                         variable=skip_var).grid(row=r, column=0, sticky="w", pady=(px(10), 0))
 
+        # Terms of use for the key, required by Torn's API rules wherever a key is asked for.
+        terms = tk.Frame(frm, bg=BG)
+        terms.grid(row=r + 1, column=0, columnspan=2, sticky="ew", pady=(px(18), 0))
+        tk.Label(terms, text="Terms of use for your API key", bg=BG, fg=TEXT,
+                 font=(FONT, 10, "bold")).grid(row=0, column=0, columnspan=2, sticky="w")
+        for i, (name, text) in enumerate(tf.KEY_TERMS, 1):
+            tk.Label(terms, text=name, bg=BG, fg=MUTED, font=(FONT, 8, "bold"),
+                     anchor="nw").grid(row=i, column=0, sticky="nw", padx=(0, px(12)), pady=px(1))
+            tk.Label(terms, text=text, bg=BG, fg=DIM, font=(FONT, 8), justify="left",
+                     anchor="w", wraplength=px(420)).grid(row=i, column=1, sticky="w", pady=px(1))
+
         btns = tk.Frame(frm, bg=BG)
-        btns.grid(row=r + 1, column=0, columnspan=2, sticky="e", pady=(px(22), 0))
+        btns.grid(row=r + 2, column=0, columnspan=2, sticky="e", pady=(px(22), 0))
 
         def save():
             try:
@@ -936,6 +947,8 @@ class App:
                     post(("balance", m))
                     wallet = tf.spendable(m, s["money_source"])
                 except tf.TornAPIError as e:
+                    if e.fatal:
+                        raise
                     post(("balance_error", str(e)))
                     wallet = None
 
@@ -950,18 +963,24 @@ class App:
                 try:
                     market = client.item_market(item["id"])
                 except tf.TornAPIError as e:
+                    if e.fatal:
+                        raise
                     post(("status", f"Skipped {item['name']}: {e}"))
                     continue
                 post(("row", tf.analyze(item, market, wallet, s["fee_percent"], self.history)))
                 post(("progress", i))
-            tf.save_json(tf.HISTORY_PATH, self.history)
         except tf.TornAPIError as e:
+            if e.fatal:
+                # Stop now and cancel auto-refresh: more calls would fail the same way,
+                # and Torn may block the IP of a program that keeps using a bad key.
+                self.stop_event.set()
             post(("error", str(e)))
         except SystemExit as e:  # unknown item names in the watchlist
             post(("error", str(e)))
         except Exception as e:
             post(("error", f"Unexpected error: {e!r}"))
         finally:
+            tf.save_json(tf.HISTORY_PATH, self.history)
             post(("finished",))
 
     def stop(self):

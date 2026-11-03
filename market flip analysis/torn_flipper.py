@@ -23,6 +23,7 @@ import csv
 import json
 import os
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -49,18 +50,87 @@ DEFAULT_CONFIG = {
 
 MAX_SNAPSHOTS = 60  # per item, for liquidity estimates
 
+# Terms of use for your API key, as Torn's API rules require. Shown wherever the
+# app asks for a key, and in README.md.
+KEY_TERMS = [
+    ("Data storage", "Only on your computer: item list (items_cache.json), market snapshots "
+                     "(market_history.json) and settings (config.json). Your balance is not saved."),
+    ("Data sharing", "None. Data goes only between your computer and api.torn.com."),
+    ("Purpose of use", "Find item market flips and show your spendable cash. Read-only."),
+    ("Key storage & sharing", f"Saved in the {API_KEY_ENV} user environment variable on your "
+                              "computer. Never written to a file or sent anywhere except Torn."),
+    ("Key access level", "Limited Access (to read your balance). Public works if you set "
+                         "the money amount yourself."),
+]
+
+
+def key_terms_text():
+    width = max(len(name) for name, _ in KEY_TERMS)
+    return "Terms of use for your API key:\n" + "\n".join(
+        f"  {name.ljust(width)} : {text}" for name, text in KEY_TERMS)
+
 
 # --------------------------------------------------------------------------- API
 
+# Errors where every further call would fail too. Torn can temporarily ban the
+# IP of anyone who keeps calling with a bad key, so a run must stop on these.
+FATAL_ERROR_CODES = {
+    1,   # key is empty
+    2,   # incorrect key
+    5,   # too many requests (still, after waiting)
+    8,   # IP block
+    9,   # API disabled
+    10,  # key owner is in federal jail
+    13,  # key disabled because the owner was inactive for 7+ days
+    14,  # daily read limit reached
+    18,  # key paused by the owner
+    24,  # API closed temporarily
+}
+
+
 class TornAPIError(Exception):
-    pass
+    def __init__(self, message, code=None):
+        super().__init__(message)
+        self.code = code
+
+    @property
+    def fatal(self):
+        """True if the whole run should stop instead of skipping one item."""
+        return self.code in FATAL_ERROR_CODES
+
+
+class _RateLimiter:
+    """One shared gap between API calls for every TornClient in this program.
+
+    Torn allows 100 calls per minute per user across all keys, so the window app's
+    background jobs (item list, balance, scan) must share one limit.
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._next_ok = 0.0
+
+    def wait(self, delay):
+        with self._lock:
+            now = time.monotonic()
+            start = max(now, self._next_ok)
+            self._next_ok = start + delay
+        if start > now:
+            time.sleep(start - now)
+
+    def pause(self, seconds):
+        """Hold back every client, e.g. after Torn reports too many requests."""
+        with self._lock:
+            self._next_ok = max(self._next_ok, time.monotonic() + seconds)
+
+
+RATE_LIMITER = _RateLimiter()
 
 
 class TornClient:
     def __init__(self, api_key, delay):
         self.api_key = api_key
-        self.delay = delay
-        self._last_call = 0.0
+        self.delay = max(float(delay), 0.6)  # never more than 100 calls per minute
         self.calls = 0
 
     def get(self, path, **params):
@@ -70,34 +140,29 @@ class TornClient:
             url += "?" + urllib.parse.urlencode(params)
 
         for attempt in range(3):
-            wait = self.delay - (time.monotonic() - self._last_call)
-            if wait > 0:
-                time.sleep(wait)
+            RATE_LIMITER.wait(self.delay)
             req = urllib.request.Request(url, headers={
                 "Authorization": f"ApiKey {self.api_key}",
                 "User-Agent": "torn-flip-finder/1.0",
             })
+            self.calls += 1
             try:
                 with urllib.request.urlopen(req, timeout=20) as resp:
                     data = json.load(resp)
             except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as e:
-                self._last_call = time.monotonic()
                 if attempt == 2:
                     raise TornAPIError(f"Network error on {path}: {e}")
-                time.sleep(3)
+                RATE_LIMITER.pause(3)
                 continue
-            finally:
-                self.calls += 1
-            self._last_call = time.monotonic()
 
             err = data.get("error") if isinstance(data, dict) else None
             if err:
                 code = err.get("code")
                 if code == 5 and attempt < 2:  # too many requests
                     print("  Rate limited by Torn, waiting 60 s...", file=sys.stderr)
-                    time.sleep(60)
+                    RATE_LIMITER.pause(60)
                     continue
-                raise TornAPIError(f"Torn API error {code}: {err.get('error')} ({path})")
+                raise TornAPIError(f"Torn API error {code}: {err.get('error')} ({path})", code)
             return data
         raise TornAPIError(f"Gave up on {path}")
 
@@ -112,9 +177,9 @@ class TornClient:
         try:
             return self.get("/user/money")["money"]
         except TornAPIError as e:
-            if "error 16" in str(e):
+            if e.code == 16:  # access level too low
                 raise TornAPIError("Your API key can't read balances. Create a Limited Access key "
-                                   "in Torn (Settings > API Keys).")
+                                   "in Torn (Settings > API Keys).", 16)
             raise
 
     def wallet(self):
@@ -459,6 +524,8 @@ def run_once(client, cfg, args, items, history):
         try:
             wallet = spendable(client.money(), cfg.get("money_source", "wallet"))
         except TornAPIError as e:
+            if e.fatal:
+                raise
             print(f"Could not read your wallet ({e}).\n"
                   "Use a Limited access key, or pass --money 5000000. Assuming unlimited money.",
                   file=sys.stderr)
@@ -474,6 +541,9 @@ def run_once(client, cfg, args, items, history):
         try:
             market = client.item_market(item["id"])
         except TornAPIError as e:
+            if e.fatal:
+                save_json(HISTORY_PATH, history)
+                raise
             print(f"  skip {item['name']}: {e}", file=sys.stderr)
             continue
         results.append(analyze(item, market, wallet, cfg["fee_percent"], history))
@@ -511,7 +581,9 @@ def ask_api_key():
     if not sys.stdin.isatty():
         raise SystemExit(f"No API key. Set the {API_KEY_ENV} environment variable or use --key.")
     print(f"No Torn API key found in the {API_KEY_ENV} environment variable.")
-    print("Create one in Torn under Settings -> API Keys (Limited Access).")
+    print("Create one in Torn under Settings -> API Keys (Limited Access).\n")
+    print(key_terms_text())
+    print()
     key = getpass.getpass("Paste your API key (hidden): ").strip()
     if not key:
         raise SystemExit("No API key given.")
@@ -562,7 +634,7 @@ def main():
             run_once(client, cfg, args, items, history)
         except TornAPIError as e:
             print(f"Error: {e}", file=sys.stderr)
-            if not args.watch:
+            if not args.watch or e.fatal:
                 sys.exit(1)
         if not args.watch:
             break

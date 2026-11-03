@@ -23,6 +23,26 @@ export YOUR_TORN_API_KEY="your-key-here"        # macOS / Linux (add to your she
 
 Optionally copy `config.example.json` to `config.json` to change the default settings.
 
+## Terms of use for your API key
+
+| | |
+|---|---|
+| **Data storage** | Only on your computer: the item list (`items_cache.json`), market snapshots (`market_history.json`) and your settings (`config.json`). Your balance is not saved. |
+| **Data sharing** | None. Data goes only between your computer and `api.torn.com`. |
+| **Purpose of use** | Find item market flips and show your spendable cash. Read-only. |
+| **Key storage & sharing** | Saved in the `YOUR_TORN_API_KEY` user environment variable on your computer. Never written to a file or sent anywhere except Torn. |
+| **Key access level** | Limited Access (to read your balance). Public works if you set the money amount yourself. |
+
+## Fair use of the Torn API
+
+- Uses only the official API (`api.torn.com`). It never loads or reads torn.com pages,
+  and opens the market page in your browser only when you click to do so.
+- Makes at most one call every 0.7 s (about 85 per minute) across the whole program,
+  below Torn's limit of 100 per minute. Don't run the command line and window app
+  at the same time, as the limit is shared across all your keys.
+- Stops at once if the key is wrong, paused or disabled, or if Torn blocks or limits requests,
+  instead of retrying.
+
 ## Window app (Tkinter)
 
 Double-click `torn_flipper_gui.pyw`, or run `python torn_flipper_gui.py`.
